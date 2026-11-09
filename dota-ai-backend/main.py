@@ -1,20 +1,41 @@
 
 import json
 import httpx
+import joblib
+import pandas as pd
+
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
 from pydantic import BaseModel, Field
 from ollama import Client, ResponseError
-import joblib
 
+# Initialise FastAPI and Ollama
 app = FastAPI()
 client = Client(host="http://localhost:11434", timeout=120)
-ml_model = joblib.load(Path(__file__).resolve().parent / "dota_ml.joblib")
 
-# Allow local React development server
+# Get the directory containing main.py
+BASE_DIR = Path(__file__).resolve().parent
+
+# MODEL 1: Item Priority Classifier
+# Predicts Damage or Defense
+ml_model = joblib.load(
+    BASE_DIR / "dota_ml.joblib"
+)
+
+# MODEL 2: Hero Performance Regressor
+# Predicts estimated Turbo win rate
+hero_bundle = joblib.load(
+    BASE_DIR / "ml" / "hero_model.joblib"
+)
+
+hero_model = hero_bundle["model"]
+hero_features = hero_bundle["features"]
+
+# Allow React to communicate with FastAPI
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -22,6 +43,8 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+# Your SYSTEM_PROMPT goes below this
+# Followed by your request models, tools and endpoints
 
 
 SYSTEM_PROMPT = """
@@ -68,10 +91,13 @@ class HistoryMessage(BaseModel):
 
 
 class CoachRequest(ChatRequest):
+    hero: str = Field(default="Dazzle", min_length=1)
+    game_mode: Literal["Turbo", "All Pick"] = "Turbo"
     hp: float | None = Field(default=None, ge=0, le=100)
     enemy_burst: float | None = Field(default=None, ge=0, le=10)
-    history: list[HistoryMessage] = Field(default_factory=list, max_length=40)
-
+    history: list[HistoryMessage] = Field(
+        default_factory=list, max_length=40
+    )
 
 PREDICTION_TOOL = {
     "type": "function",
@@ -104,22 +130,33 @@ def ollama_chat(**kwargs):
         raise HTTPException(status_code=503, detail="Ollama is unavailable or timed out. Check that it is running.") from exc
 
 
+
 @app.post("/chat")
 def chat(request: CoachRequest):
+
+    # Item ML only supports Dazzle in Turbo
     has_context = (
-        request.hp is not None
+        request.hero == "Dazzle"
+        and request.game_mode == "Turbo"
+        and request.hp is not None
         and request.enemy_burst is not None
     )
 
+    # System instructions
     messages = [{
         "role": "system",
         "content": SYSTEM_PROMPT + "\n" + (
-            "The prediction tool is an optional experiment for Dazzle in Turbo only. "
-            "Use it for relevant damage-versus-defense questions, not general questions. "
-            "It uses synthetic training examples, not validated strategy. "
-            "Never claim to have run it unless you receive a tool result. "
-            "If HP or burst values are missing, ask for them when a prediction is needed. "
-            "Explain tool results briefly and acknowledge the model's limitations."
+            "You are assisting a player with Dota 2 strategy. "
+            "The player's selected hero and game mode are supplied "
+            "by the application and are authoritative. "
+            "Always use the current selection rather than assuming "
+            "the player is using a hero from earlier messages. "
+            "Distinguish standard hero roles from experimental builds. "
+            "The item prediction tool is experimental and supports "
+            "Dazzle in Turbo only. "
+            "Its training data is synthetic, not validated strategy. "
+            "Never claim to have run a tool unless a result is provided. "
+            "Do not invent hero abilities, items or statistics."
         )
     }]
 
@@ -129,18 +166,35 @@ def chat(request: CoachRequest):
         for message in request.history
     )
 
-    # Add current user question and game context
+    # Always provide CURRENT React selection
     messages.append({
-        "role": "user",
-        "content": request.prompt + (
-            f"\n\nCurrent form values for Dazzle in Turbo: HP={request.hp}%, "
-            f"enemy burst threat={request.enemy_burst}/10. "
-            "These values apply only to the experimental prediction."
-            if has_context else ""
+        "role": "system",
+        "content": (
+            "CURRENT GAME CONTEXT:\n"
+            f"Selected hero: {request.hero}\n"
+            f"Selected game mode: {request.game_mode}\n"
+            "These values override previous selections in history. "
+            "When asked 'What hero am I?', answer using the selected hero."
         )
     })
 
-    # First LLM call: Decide whether to use the ML tool
+    # Add the current user question
+    user_content = request.prompt
+
+    # Add experimental ML inputs only when applicable
+    if has_context:
+        user_content += (
+            f"\n\nExperimental Dazzle ML context: "
+            f"HP={request.hp}%, "
+            f"enemy burst threat={request.enemy_burst}/10."
+        )
+
+    messages.append({
+        "role": "user",
+        "content": user_content
+    })
+
+    # First LLM call: decide whether ML is needed
     response = ollama_chat(
         messages=messages,
         tools=[PREDICTION_TOOL] if has_context else []
@@ -153,7 +207,6 @@ def chat(request: CoachRequest):
 
         for call in response.message.tool_calls:
 
-            # Reject unknown or unavailable tools
             if (
                 call.function.name != "predict_build_priority"
                 or not has_context
@@ -162,15 +215,14 @@ def chat(request: CoachRequest):
                     "error": "Unknown or unavailable tool."
                 }
 
-            # Prevent duplicate ML predictions
             elif category is not None:
+                # Prevent duplicate ML predictions
                 result = {
                     "error": "Prediction already performed."
                 }
 
             else:
-                # Run specialised ML model once
-                # Use validated form values, not LLM-generated values
+                # Use validated React form values
                 category = predict_priority(
                     request.hp,
                     request.enemy_burst
@@ -193,11 +245,10 @@ def chat(request: CoachRequest):
                 "content": json.dumps(result)
             })
 
-        # Second LLM call: Explain the ML prediction
-        # Only one tool round is allowed
+        # Second LLM call: explain prediction
         response = ollama_chat(messages=messages)
 
-    # Validate the final response
+    # Validate response
     if not response.message.content:
         raise HTTPException(
             status_code=502,
@@ -208,7 +259,6 @@ def chat(request: CoachRequest):
         "answer": response.message.content,
         "ml_prediction": category
     }
-
 
 @app.post("/recommend")
 def recommend(request: ItemRequest):
@@ -251,4 +301,57 @@ def recommend(request: ItemRequest):
     return {
         "ml_prediction": category,
         "llm_explanation": response.message.content
+    }
+
+@lru_cache(maxsize=1)
+def get_heroes():
+    response = httpx.get(
+        "https://api.opendota.com/api/heroStats",
+        timeout=20
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def predict_hero_performance(hero_name: str):
+    heroes = get_heroes()
+
+    hero = next(
+        (
+            h for h in heroes
+            if h["localized_name"].casefold() ==
+               hero_name.strip().casefold()
+        ),
+        None
+    )
+
+    if hero is None:
+        return {"error": f"Hero '{hero_name}' not found."}
+
+    # Use the same features and order as training
+    X = pd.DataFrame([{
+        feature: hero[feature]
+        for feature in hero_features
+    }])
+
+    predicted_rate = hero_model.predict(X)[0]
+
+    actual_rate = (
+        hero["turbo_wins"] / hero["turbo_picks"] * 100
+        if hero["turbo_picks"] else None
+    )
+
+    return {
+        "hero": hero["localized_name"],
+        "estimated_turbo_win_rate": round(
+            float(predicted_rate), 2
+        ),
+        "observed_turbo_win_rate": (
+            round(actual_rate, 2)
+            if actual_rate is not None else None
+        ),
+        "limitation": (
+            "Experimental regression using hero attributes. "
+            "Not a reliable forecast of match outcomes."
+        )
     }
