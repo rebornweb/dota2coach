@@ -43,7 +43,24 @@ body {
 
 form {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.game-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  width: 100%;
+  border: 1px solid #4b5563;
+  border-radius: 8px;
+}
+
+.game-context label {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 8px;
 }
 
 input {

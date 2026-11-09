@@ -1,5 +1,6 @@
 
 from sklearn.tree import DecisionTreeClassifier
+from pathlib import Path
 import joblib
 
 # Features: [HP percentage, enemy burst threat]
@@ -24,6 +25,6 @@ model = DecisionTreeClassifier(
 
 model.fit(X, y)
 
-joblib.dump(model, "dota_ml.joblib")
+joblib.dump(model, Path(__file__).resolve().parent / "dota_ml.joblib")
 
 print("ML model trained and saved!")
