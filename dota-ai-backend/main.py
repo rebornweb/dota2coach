@@ -1,5 +1,6 @@
 
 import json
+import re
 import httpx
 import joblib
 import pandas as pd
@@ -145,7 +146,13 @@ def is_tool_payload(content: str | None) -> bool:
     try:
         payload = json.loads(text)
     except ValueError:
-        return False
+        # A model can emit unescaped nested JSON or truncate the payload.
+        # Recognise its tool envelope without parsing or executing the text.
+        return bool(
+            re.search(r'["\']name["\']\s*:\s*["\'][^"\']+["\']', text)
+            and re.search(r'["\'](?:parameters|arguments)["\']\s*:', text)
+            or re.search(r'["\']tool_calls["\']\s*:', text)
+        )
     entries = payload if isinstance(payload, list) else [payload]
     return any(isinstance(entry, dict) and (
         "tool_calls" in entry or "function" in entry or

@@ -51,6 +51,20 @@ class CoachTests(unittest.TestCase):
             self.assertEqual(response.status_code, 502)
             self.assertEqual(llm.call_count, 2)
 
+    def test_malformed_nested_tool_payload_is_retried(self):
+        payload = ('{"name": "get_hero_info", "parameters": {"q": "'
+                   '{"localized_name": "Dazzle", "roles": ["Support", "Disabler""]}"}}')
+        with patch.object(main.client, "chat", side_effect=[reply(payload), reply("Roles: Carry. Primary attribute: agility.")]) as llm:
+            response = self.api.post("/chat", json={"hero": "Anti-Mage", "prompt": "Roles and attribute?"})
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("get_hero_info", response.json()["answer"])
+            self.assertEqual(llm.call_count, 2)
+
+    def test_repeated_malformed_tool_payload_is_blocked(self):
+        with patch.object(main.client, "chat", return_value=reply('{"name":"get_hero_info","parameters": {')):
+            response = self.api.post("/chat", json={"prompt": "Roles?"})
+            self.assertEqual(response.status_code, 502)
+
     def test_hero_tool_uses_selected_hero_and_returns_rates(self):
         with patch.object(main.client, "chat", side_effect=[
             reply(tool="predict_hero_performance"), reply("Experimental performance")
