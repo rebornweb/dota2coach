@@ -4,7 +4,6 @@ import httpx
 import joblib
 import pandas as pd
 
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from ollama import Client, ResponseError
+from dota_data import get_heroes
 
 # Initialise FastAPI and Ollama
 app = FastAPI()
@@ -39,7 +39,7 @@ hero_features = hero_bundle["features"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
 
@@ -129,6 +129,15 @@ def ollama_chat(**kwargs):
     except (ConnectionError, TimeoutError, httpx.TransportError) as exc:
         raise HTTPException(status_code=503, detail="Ollama is unavailable or timed out. Check that it is running.") from exc
 
+
+
+@app.get("/heroes")
+def list_heroes():
+    try:
+        heroes = get_heroes()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return sorted({hero["localized_name"] for hero in heroes}, key=str.casefold)
 
 
 @app.post("/chat")
@@ -302,16 +311,6 @@ def recommend(request: ItemRequest):
         "ml_prediction": category,
         "llm_explanation": response.message.content
     }
-
-@lru_cache(maxsize=1)
-def get_heroes():
-    response = httpx.get(
-        "https://api.opendota.com/api/heroStats",
-        timeout=20
-    )
-    response.raise_for_status()
-    return response.json()
-
 
 def predict_hero_performance(hero_name: str):
     heroes = get_heroes()

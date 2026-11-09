@@ -18,6 +18,20 @@ class CoachTests(unittest.TestCase):
     def setUp(self):
         self.api = TestClient(main.app)
 
+    def test_hero_list_uses_localized_names_sorted_and_unique(self):
+        with patch.object(main, "get_heroes", return_value=[
+            {"name": "npc_dota_hero_dazzle", "localized_name": "Dazzle"},
+            {"name": "npc_dota_hero_bane", "localized_name": "Bane"},
+            {"localized_name": "Bane"},
+        ]):
+            response = self.api.get("/heroes")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), ["Bane", "Dazzle"])
+
+    def test_hero_list_unavailable(self):
+        with patch.object(main, "get_heroes", side_effect=RuntimeError("No cache")):
+            self.assertEqual(self.api.get("/heroes").status_code, 503)
+
     def test_general_chat_skips_prediction_and_preserves_history(self):
         with patch.object(main.client, "chat", return_value=reply("Hello")) as llm, \
                 patch.object(main.ml_model, "predict") as predict:

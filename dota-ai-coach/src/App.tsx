@@ -1,5 +1,6 @@
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
 import "./App.css";
 
 type Message = {
@@ -22,21 +23,6 @@ type ChatResponse = {
   hero_prediction?: HeroPrediction | null;
 };
 
-const HEROES = [
-  "Dazzle",
-  "Earthshaker",
-  "Anti-Mage",
-  "Phantom Lancer",
-  "Axe",
-  "Ogre Magi",
-  "Pudge",
-  "Sniper",
-  "Witch Doctor",
-  "Viper",
-  "Luna",
-  "Legion Commander",
-];
-
 export default function App() {
   const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -47,6 +33,33 @@ export default function App() {
   const [gameMode, setGameMode] = useState("Turbo");
   const [hp, setHp] = useState("");
   const [enemyBurst, setEnemyBurst] = useState("");
+  const [heroes, setHeroes] = useState<string[]>(["Dazzle"]);
+  const [heroListError, setHeroListError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadHeroes() {
+      try {
+        const response = await fetch("http://localhost:8000/heroes", {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const names: unknown = await response.json();
+        if (!Array.isArray(names) || names.length === 0
+            || !names.every(name => typeof name === "string" && name.trim())) {
+          throw new Error("Invalid hero list");
+        }
+        setHeroes(names);
+        setHero(current => names.includes(current) ? current : names[0]);
+      } catch {
+        if (!controller.signal.aborted) {
+          setHeroListError("Could not load heroes. Dazzle is available; reload to retry.");
+        }
+      }
+    }
+    void loadHeroes();
+    return () => controller.abort();
+  }, []);
 
   async function sendMessage(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -198,12 +211,13 @@ export default function App() {
               value={hero}
               onChange={e => setHero(e.target.value)}
             >
-              {HEROES.map(name => (
+              {heroes.map(name => (
                 <option key={name} value={name}>
                   {name}
                 </option>
               ))}
             </select>
+            {heroListError && <small role="status">{heroListError}</small>}
           </label>
 
           <label>
@@ -289,7 +303,11 @@ export default function App() {
               {message.role === "user" ? "You" : "AI"}
             </strong>
 
-            <p>{message.content}</p>
+            {message.role === "assistant" ? (
+              <ReactMarkdown>{message.content}</ReactMarkdown>
+            ) : (
+              <p>{message.content}</p>
+            )}
           </div>
         ))}
 
