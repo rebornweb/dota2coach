@@ -153,6 +153,7 @@ export default function App() {
               `Observed Turbo win rate: ${stats.observed_turbo_win_rate.toFixed(2)}%`
             );
           }
+          if (stats.limitation) details.push(stats.limitation);
         }
       }
 

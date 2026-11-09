@@ -113,9 +113,44 @@ PREDICTION_TOOL = {
 }
 
 
+HERO_PREDICTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "predict_hero_performance",
+        "description": (
+            "Estimate the currently selected hero's Turbo win rate using an experimental "
+            "regression model and report observed Turbo wins/picks. Use for questions "
+            "about this hero's Turbo performance, not identity or basic attributes. "
+            "This is not a forecast of the player's match outcome."
+        ),
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+
+def find_hero(hero_name: str):
+    return next((hero for hero in get_heroes()
+                 if hero["localized_name"].casefold() == hero_name.strip().casefold()), None)
+
+
 def predict_priority(hp: float, enemy_burst: float) -> str:
     prediction = ml_model.predict([[hp, enemy_burst]])[0]
     return "Defense" if prediction == 0 else "Damage"
+
+
+def is_tool_payload(content: str | None) -> bool:
+    text = (content or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        text = "\n".join(text.splitlines()[1:-1]).strip()
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return False
+    entries = payload if isinstance(payload, list) else [payload]
+    return any(isinstance(entry, dict) and (
+        "tool_calls" in entry or "function" in entry or
+        ("name" in entry and ("parameters" in entry or "arguments" in entry))
+    ) for entry in entries)
 
 
 def ollama_chat(**kwargs):
@@ -143,6 +178,21 @@ def list_heroes():
 @app.post("/chat")
 def chat(request: CoachRequest):
 
+    try:
+        selected_hero = find_hero(request.hero)
+        data_error = None if selected_hero else "Selected hero was not found in the hero data."
+    except RuntimeError:
+        selected_hero = None
+        data_error = "Hero reference data is unavailable; do not invent statistics."
+
+    # Keep the original field names: base stats are not total in-game stats.
+    reference = ({key: selected_hero[key] for key in dict.fromkeys([
+        "localized_name", "primary_attr", "attack_type", "roles", *hero_features,
+        "base_health_regen", "base_mana", "base_mana_regen", "base_mr",
+        "attack_rate", "attack_point", "day_vision", "night_vision",
+    ]) if key in selected_hero} if selected_hero else {"error": data_error})
+    hero_tool_available = request.game_mode == "Turbo" and selected_hero is not None
+
     # Item ML only supports Dazzle in Turbo
     has_context = (
         request.hero == "Dazzle"
@@ -165,7 +215,15 @@ def chat(request: CoachRequest):
             "Dazzle in Turbo only. "
             "Its training data is synthetic, not validated strategy. "
             "Never claim to have run a tool unless a result is provided. "
-            "Do not invent hero abilities, items or statistics."
+            "Do not invent hero abilities, items or statistics. "
+            "Use the supplied hero reference fields for attribute questions. "
+            "Base attributes are already provided; there is no get_base_attributes tool. "
+            "Answer attribute questions directly from the reference data in plain language. "
+            "Never print tool-call JSON as an answer or invent tool names. "
+            "Base stats are not total in-game stats; do not equate base_health with total HP. "
+            "Hero reference data may be cached and does not include ability or item mechanics. "
+            "The hero performance tool is a separate experimental regression for Turbo only. "
+            "Distinguish its estimated rate from the observed rate and from a personal win chance."
         )
     }]
 
@@ -183,7 +241,8 @@ def chat(request: CoachRequest):
             f"Selected hero: {request.hero}\n"
             f"Selected game mode: {request.game_mode}\n"
             "These values override previous selections in history. "
-            "When asked 'What hero am I?', answer using the selected hero."
+            "When asked 'What hero am I?', answer using the selected hero.\n"
+            "Hero reference data (JSON): " + json.dumps(reference)
         )
     })
 
@@ -204,19 +263,28 @@ def chat(request: CoachRequest):
     })
 
     # First LLM call: decide whether ML is needed
+    tools = ([PREDICTION_TOOL] if has_context else [])
+    if hero_tool_available:
+        tools.append(HERO_PREDICTION_TOOL)
     response = ollama_chat(
         messages=messages,
-        tools=[PREDICTION_TOOL] if has_context else []
+        tools=tools
     )
 
     category = None
+    hero_prediction = None
 
     if response.message.tool_calls:
         messages.append(response.message)
 
         for call in response.message.tool_calls:
 
-            if (
+            if call.function.name == "predict_hero_performance" and hero_tool_available:
+                if hero_prediction is None:
+                    hero_prediction = predict_hero_performance(request.hero, selected_hero)
+                result = hero_prediction
+
+            elif (
                 call.function.name != "predict_build_priority"
                 or not has_context
             ):
@@ -257,6 +325,21 @@ def chat(request: CoachRequest):
         # Second LLM call: explain prediction
         response = ollama_chat(messages=messages)
 
+    # Some small models print a function request as content instead of tool_calls.
+    # Do not execute this text; ask once for an answer using the existing data.
+    if is_tool_payload(response.message.content):
+        messages.append(response.message)
+        messages.append({"role": "user", "content": (
+            "Please answer my previous question in plain language using the supplied "
+            "hero reference data and any actual tool results. Do not output a function "
+            "request or tool JSON. If information is missing, say so."
+        )})
+        response = ollama_chat(messages=messages)
+    if response.message.tool_calls or is_tool_payload(response.message.content):
+        raise HTTPException(status_code=502, detail=(
+            "The AI returned a tool request instead of an answer. Please try again."
+        ))
+
     # Validate response
     if not response.message.content:
         raise HTTPException(
@@ -266,7 +349,8 @@ def chat(request: CoachRequest):
 
     return {
         "answer": response.message.content,
-        "ml_prediction": category
+        "ml_prediction": category,
+        "hero_prediction": hero_prediction,
     }
 
 @app.post("/recommend")
@@ -312,22 +396,23 @@ def recommend(request: ItemRequest):
         "llm_explanation": response.message.content
     }
 
-def predict_hero_performance(hero_name: str):
-    heroes = get_heroes()
-
-    hero = next(
-        (
-            h for h in heroes
-            if h["localized_name"].casefold() ==
-               hero_name.strip().casefold()
-        ),
-        None
-    )
+def predict_hero_performance(hero_name: str, hero=None):
+    if hero is None:
+        try:
+            hero = find_hero(hero_name)
+        except RuntimeError:
+            return {"error": "Hero data is unavailable. Please try again later."}
 
     if hero is None:
         return {"error": f"Hero '{hero_name}' not found."}
 
     # Use the same features and order as training
+    required = [*hero_features, "turbo_wins", "turbo_picks"]
+    if any(not isinstance(hero.get(field), (int, float))
+           or not pd.notna(hero[field]) for field in required):
+        return {"error": "Hero data is incomplete; a performance prediction is unavailable."}
+    if hero["turbo_picks"] < 0 or not 0 <= hero["turbo_wins"] <= hero["turbo_picks"]:
+        return {"error": "Hero win/pick counts are invalid."}
     X = pd.DataFrame([{
         feature: hero[feature]
         for feature in hero_features
@@ -342,6 +427,7 @@ def predict_hero_performance(hero_name: str):
 
     return {
         "hero": hero["localized_name"],
+        "game_mode": "Turbo",
         "estimated_turbo_win_rate": round(
             float(predicted_rate), 2
         ),
