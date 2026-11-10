@@ -6,6 +6,7 @@ import "./App.css";
 type Message = {
   role: "user" | "assistant";
   content: string;
+  timestamp: string;
   failed?: boolean;
 };
 
@@ -73,7 +74,7 @@ export default function App() {
 
     setMessages(prev => [
       ...prev,
-      { role: "user", content: question }
+      { role: "user", content: question, timestamp: new Date().toISOString() }
     ]);
 
     try {
@@ -166,7 +167,8 @@ export default function App() {
         ...prev,
         {
           role: "assistant",
-          content
+          content,
+          timestamp: new Date().toISOString()
         }
       ]);
 
@@ -177,6 +179,7 @@ export default function App() {
         ...prev,
         {
           role: "assistant",
+          timestamp: new Date().toISOString(),
           content:
             error instanceof Error
               ? error.message
@@ -294,25 +297,40 @@ export default function App() {
 
       </form>
       
-      <section className="chat">
-        {messages.map((message, index) => (
+      <section className="chat" aria-label="Conversation">
+        {loading && <p className="chat-status" role="status">AI Coach is thinking...</p>}
+        {messages.slice().reverse().map((message, index) => (
           <div
-            key={index}
+            key={messages.length - 1 - index}
             className={`message ${message.role}`}
           >
-            <strong>
-              {message.role === "user" ? "You" : "AI"}
+            <strong className="message-label">
+              <span className="message-avatar" aria-hidden="true">
+                {message.role === "user" ? "Y" : "AI"}
+              </span>
+              {message.role === "user" ? "You" : "AI Coach"}
+              <time
+                className="message-time"
+                dateTime={message.timestamp}
+                title={new Date(message.timestamp).toLocaleString()}
+              >
+                {new Date(message.timestamp).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </time>
             </strong>
 
+            <div className="message-content">
             {message.role === "assistant" ? (
               <ReactMarkdown>{message.content}</ReactMarkdown>
             ) : (
               <p>{message.content}</p>
             )}
+            </div>
           </div>
         ))}
 
-        {loading && <p>AI is thinking...</p>}
       </section>
 
     </main>
