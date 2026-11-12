@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from ollama import Client, ResponseError
 from dota_data import get_heroes
 from item_data import get_item_popularity
+from scenario_data import get_scenarios
 
 # Initialise FastAPI and Ollama
 app = FastAPI()
@@ -150,6 +151,39 @@ def find_hero(hero_name: str):
                  if hero["localized_name"].casefold() == hero_name.strip().casefold()), None)
 
 
+def asks_starting_items(prompt: str) -> bool:
+    return bool(re.search(
+        r"\b(?:start(?:ing)?[\s_-]+(?:game|games|items?|builds?|buys?|purchases?)"
+        r"|early[\s_-]+game|opening[\s_-]+(?:items?|builds?)|start_game_items)\b", prompt, re.I))
+
+
+def starting_item_answer(hero, game_mode, popularity):
+    """Render verified starting purchases without an unconstrained model completion."""
+    if not popularity or "error" in popularity:
+        return (f"Starting-item data for {hero} is unavailable. I cannot verify a starting "
+                "build from the current references. Please retry shortly.")
+    rows = popularity.get("stages", {}).get("start_game_items", [])
+    answer = [f"Starting-item purchase data for {hero}:"]
+    if not rows:
+        answer.append("OpenDota reports no starting purchases for this hero.")
+    else:
+        # Names are data, never generated hero abilities or claimed item effects.
+        for row in rows[:10]:
+            answer.append(f"- {row['name']}: {row['count']} purchases "
+                          f"({row['purchase_share_pct']}% of starting purchases).")
+    answer.append("These are aggregate purchases, not a complete starting loadout or proof of the best build. "
+                  "Repeated purchases can be counted; shares are not percentages of matches.")
+    answer.append(f"Your selected mode is {game_mode}; this endpoint has no mode filter and is not Turbo-specific.")
+    if popularity.get("fetched_at"):
+        answer.append(f"Fetched: {popularity['fetched_at']}.")
+    if popularity.get("stale"):
+        answer.append("Warning: these counts are stale because OpenDota could not refresh them.")
+    if popularity.get("items_stale"):
+        answer.append("Warning: item names may be stale or unavailable; unknown items retain their IDs.")
+    answer.append("The supplied data does not establish item effects or hero abilities.")
+    return "\n\n".join(answer)
+
+
 def predict_priority(hp: float, enemy_burst: float) -> str:
     prediction = ml_model.predict([[hp, enemy_burst]])[0]
     return "Defense" if prediction == 0 else "Damage"
@@ -209,6 +243,18 @@ def item_popularity(hero: str):
         raise HTTPException(status_code=503, detail="OpenDota item data unavailable; retry shortly.") from exc
 
 
+@app.get("/scenarios")
+def scenarios(hero: str):
+    try:
+        selected = find_hero(hero)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Hero not found")
+        return {"hero": selected["localized_name"], "hero_id": selected["id"],
+                "scenarios": get_scenarios(selected["id"])}
+    except (RuntimeError, KeyError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Hero scenario data unavailable.") from exc
+
+
 @app.post("/chat")
 def chat(request: CoachRequest):
 
@@ -226,7 +272,30 @@ def chat(request: CoachRequest):
         "attack_rate", "attack_point", "day_vision", "night_vision",
     ]) if key in selected_hero} if selected_hero else {"error": data_error})
     hero_tool_available = request.game_mode == "Turbo" and selected_hero is not None
+    starting_items = asks_starting_items(request.prompt)
+    if starting_items:
+        popularity = None
+        if selected_hero and type(selected_hero.get("id")) is int:
+            try:
+                popularity = get_item_popularity(selected_hero["id"])
+            except (RuntimeError, ValueError):
+                pass
+        return {"answer": starting_item_answer(request.hero, request.game_mode, popularity),
+                "ml_prediction": None, "hero_prediction": None}
     item_reference = None
+    scenario_reference = None
+    if selected_hero and type(selected_hero.get("id")) is int:
+        kinds = []
+        if re.search(r"\b(items?|builds?|buy|purchase|timings?)\b", request.prompt, re.I):
+            kinds.append("itemTimings")
+        if re.search(r"\b(lanes?|roles?|support|positions?)\b", request.prompt, re.I):
+            kinds.append("laneRoles")
+        if re.search(r"\b(courier|first blood|team scenarios?|chat scenarios?)\b", request.prompt, re.I):
+            kinds.append("misc")
+        if kinds:
+            scenario_reference = get_scenarios(selected_hero["id"], kinds)
+            scenario_reference = {kind: {**data, "rows": data["rows"][:20]} if "rows" in data else data
+                                  for kind, data in scenario_reference.items()}
     if re.search(r"\b(item|items|build|builds|popular|popularity|buy|purchase)\b", request.prompt, re.I):
         if selected_hero and type(selected_hero.get("id")) is int:
             try:
@@ -297,12 +366,20 @@ def chat(request: CoachRequest):
             f"Selected hero: {request.hero}\n"
             f"Selected game mode: {request.game_mode}\n"
             "These values override previous selections in history. "
+            "Previous assistant messages may contain factual mistakes; they are not reference data. "
+            "No hero ability reference is supplied: do not name or describe abilities from memory. "
+            "Hero win-rate predictions do not identify starting items or validate builds. "
             "When asked 'What hero am I?', answer using the selected hero.\n"
             "Hero reference data (JSON): " + json.dumps(reference)
             + ("\nItem popularity reference (JSON): " + json.dumps(item_reference)
                + "\nPopularity establishes names and purchase counts only, never effects. "
                "Disclose stale data and mode limitations when using it."
                if item_reference is not None else "")
+            + ("\nScenario outcomes (JSON): " + json.dumps(scenario_reference)
+               + "\nReport games with win rates, disclose small samples and stale data. "
+               "These are associations, not proof an item causes wins. Time is in seconds. "
+               "Use only provided rows; omitted rows are not evidence of no purchases."
+               if scenario_reference is not None else "")
         )
     })
 

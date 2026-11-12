@@ -1,6 +1,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
+import Scenarios from "./Scenarios";
 import "./App.css";
 
 type Message = {
@@ -335,7 +336,7 @@ export default function App() {
           <p>Fetched: {new Date(itemData.fetched_at).toLocaleString()}
             {itemData.stale && " · Stale data: OpenDota unavailable"}
             {itemData.items_stale && " · Item names unavailable or stale"}</p>
-          {Object.entries(itemData.stages).map(([stage, rows]) => <details key={stage}>
+          {Object.entries(itemData.stages).map(([stage, rows]) => <details key={stage} open>
             <summary>{stage.replaceAll("_", " ")}</summary>
             {rows.length ? <ol>{rows.slice(0, 10).map(item => <li key={item.item_id}>
               {item.name}: {item.count} purchases ({item.purchase_share_pct}% of stage purchases)
@@ -344,6 +345,7 @@ export default function App() {
           <small>{itemData.limitation}</small>
         </> : !itemError && <p role="status">Loading item popularity…</p>}
       </section>
+      <Scenarios key={hero} hero={hero} />
       <section className="chat" aria-label="Conversation">
         {loading && <p className="chat-status" role="status">AI Coach is thinking...</p>}
         {messages.slice().reverse().map((message, index) => (

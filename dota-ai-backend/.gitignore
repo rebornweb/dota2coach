@@ -1,4 +1,6 @@
 item_cache/
+ml/item_timings.joblib
+ml/item_timings_training.json
 ml/item_popularity.joblib
 ml/item_popularity_training.json
 __pycache__/
