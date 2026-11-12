@@ -1,0 +1,4 @@
+item_cache/
+ml/item_popularity.joblib
+ml/item_popularity_training.json
+__pycache__/

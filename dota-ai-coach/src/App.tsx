@@ -24,6 +24,15 @@ type ChatResponse = {
   hero_prediction?: HeroPrediction | null;
 };
 
+type ItemPopularity = {
+  hero: string;
+  fetched_at: string;
+  stale: boolean;
+  items_stale: boolean;
+  limitation: string;
+  stages: Record<string, { item_id: number; name: string; count: number; purchase_share_pct: number }[]>;
+};
+
 export default function App() {
   const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -36,6 +45,27 @@ export default function App() {
   const [enemyBurst, setEnemyBurst] = useState("");
   const [heroes, setHeroes] = useState<string[]>(["Dazzle"]);
   const [heroListError, setHeroListError] = useState("");
+  const [itemData, setItemData] = useState<ItemPopularity | null>(null);
+  const [itemError, setItemError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadItems() {
+      try {
+        const response = await fetch(`http://localhost:8000/item-popularity?hero=${encodeURIComponent(hero)}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Item popularity unavailable. Retrying automatically.");
+        const data: ItemPopularity = await response.json();
+        if (!controller.signal.aborted) { setItemData(data); setItemError(""); }
+      } catch (error) {
+        if (!controller.signal.aborted) setItemError(error instanceof Error ? error.message : "Item data unavailable");
+      }
+    }
+    void loadItems();
+    const timer = window.setInterval(() => void loadItems(), 60000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [hero]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -297,6 +327,23 @@ export default function App() {
 
       </form>
       
+      <section aria-label="Item popularity">
+        <h2>Popular items for {hero}</h2>
+        <p>OpenDota aggregate purchases · refreshed every 5 minutes · no Turbo filter</p>
+        {itemError && <p role="status">{itemError}</p>}
+        {itemData?.hero === hero ? <>
+          <p>Fetched: {new Date(itemData.fetched_at).toLocaleString()}
+            {itemData.stale && " · Stale data: OpenDota unavailable"}
+            {itemData.items_stale && " · Item names unavailable or stale"}</p>
+          {Object.entries(itemData.stages).map(([stage, rows]) => <details key={stage}>
+            <summary>{stage.replaceAll("_", " ")}</summary>
+            {rows.length ? <ol>{rows.slice(0, 10).map(item => <li key={item.item_id}>
+              {item.name}: {item.count} purchases ({item.purchase_share_pct}% of stage purchases)
+            </li>)}</ol> : <p>No purchases reported.</p>}
+          </details>)}
+          <small>{itemData.limitation}</small>
+        </> : !itemError && <p role="status">Loading item popularity…</p>}
+      </section>
       <section className="chat" aria-label="Conversation">
         {loading && <p className="chat-status" role="status">AI Coach is thinking...</p>}
         {messages.slice().reverse().map((message, index) => (

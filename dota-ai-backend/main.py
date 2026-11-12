@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from ollama import Client, ResponseError
 from dota_data import get_heroes
+from item_data import get_item_popularity
 
 # Initialise FastAPI and Ollama
 app = FastAPI()
@@ -197,6 +198,17 @@ def list_heroes():
     return sorted({hero["localized_name"] for hero in heroes}, key=str.casefold)
 
 
+@app.get("/item-popularity")
+def item_popularity(hero: str):
+    try:
+        selected = find_hero(hero)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Hero not found")
+        return {"hero": selected["localized_name"], **get_item_popularity(selected["id"])}
+    except (RuntimeError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=503, detail="OpenDota item data unavailable; retry shortly.") from exc
+
+
 @app.post("/chat")
 def chat(request: CoachRequest):
 
@@ -214,6 +226,15 @@ def chat(request: CoachRequest):
         "attack_rate", "attack_point", "day_vision", "night_vision",
     ]) if key in selected_hero} if selected_hero else {"error": data_error})
     hero_tool_available = request.game_mode == "Turbo" and selected_hero is not None
+    item_reference = None
+    if re.search(r"\b(item|items|build|builds|popular|popularity|buy|purchase)\b", request.prompt, re.I):
+        if selected_hero and type(selected_hero.get("id")) is int:
+            try:
+                item_reference = get_item_popularity(selected_hero["id"])
+                item_reference = {**item_reference, "stages": {
+                    stage: rows[:10] for stage, rows in item_reference["stages"].items()}}
+            except (RuntimeError, ValueError):
+                item_reference = {"error": "Item popularity unavailable; do not invent purchases or effects."}
 
     # Item ML only supports Dazzle in Turbo
     has_context = (
@@ -278,6 +299,10 @@ def chat(request: CoachRequest):
             "These values override previous selections in history. "
             "When asked 'What hero am I?', answer using the selected hero.\n"
             "Hero reference data (JSON): " + json.dumps(reference)
+            + ("\nItem popularity reference (JSON): " + json.dumps(item_reference)
+               + "\nPopularity establishes names and purchase counts only, never effects. "
+               "Disclose stale data and mode limitations when using it."
+               if item_reference is not None else "")
         )
     })
 
